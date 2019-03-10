@@ -1,0 +1,6 @@
+lm.ini
+lm.db
+lm.log
+*.o
+/lm
+
