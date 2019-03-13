@@ -67,7 +67,7 @@ L and LM should work as expected.
 
 # Other Notes
 
-* It's called LM because of the broken
+* It's called LM as a homage of the broken
   [LM hash](https://en.wikipedia.org/wiki/LAN_Manager#LM_hash_details), which is
   both short, memorable, related to authentication and starts with L.
   However, LM uses the argon2i algorithm for password hashing.
@@ -87,7 +87,17 @@ ISC, see LICENSE
 
 # Bugs and Security Issues
 
-Loads, probably.
+* [ircu does not support TLS](https://sourceforge.net/p/undernet-ircu/feature-requests/33/).
+  Passwords can be trivially intercepted by any attacker that can sniff network
+  traffic (which is a lot of people on public wi-fi hotspots).
+  It's not really possible to tack on something more reasonable for
+  authentication.
+  Forks of ircu exist that do support TLS, such as
+  [nefarious2](https://github.com/evilnet/nefarious2).
+  LM (and L) both only use very basic ircu server-side facilities,
+  so that you should be able to use any ircu fork in theory.
+
+Loads more, probably.
 
 **This is not production software.
 It has not spent even a single second of its life in a live environment.
