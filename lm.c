@@ -1,6 +1,7 @@
 #include <sys/time.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 
 #include <event2/buffer.h>
 #include <event2/bufferevent.h>
@@ -23,6 +24,7 @@
 #include "commands.h"
 #include "ini.h"
 #include "logging.h"
+#include "monocypher.h"
 #include "numnick.h"
 #include "util.h"
 
@@ -33,11 +35,14 @@
 
 static struct event_base *ev_base;
 static struct User *L_user;
-static struct bufferevent *bev;
+static struct bufferevent *irc_bev;
+static struct bufferevent *hasher_bev;
 static struct Server *me;
 static bool initial_link = true;
 static bool event_loop_running = false;
 static char uplink_numeric[3];
+
+static pid_t hasher_pid;
 
 struct Config config;
 
@@ -145,8 +150,8 @@ send_line(const char *fmt, ...)
 	buf[len]     = '\r';
 	buf[len + 1] = '\n';
 	len += 2;
-	evbuffer_expand(bufferevent_get_output(bev), (size_t)len);
-	evbuffer_add(bufferevent_get_output(bev), buf, (size_t)len);
+	evbuffer_expand(bufferevent_get_output(irc_bev), (size_t)len);
+	evbuffer_add(bufferevent_get_output(irc_bev), buf, (size_t)len);
 }
 
 void
@@ -196,9 +201,9 @@ reply(const struct User *u, const char *fmt, ...)
 static void
 disconnect()
 {
-	if (bev != NULL) {
-		bufferevent_free(bev);
-		bev = NULL;
+	if (irc_bev != NULL) {
+		bufferevent_free(irc_bev);
+		irc_bev = NULL;
 	}
 
 	if (event_loop_running) {
@@ -541,20 +546,20 @@ connect_remote(void)
 				strerror(errno));
 	}
 
-	if ((bev = bufferevent_socket_new(ev_base, -1, BEV_OPT_CLOSE_ON_FREE))
+	if ((irc_bev = bufferevent_socket_new(ev_base, -1, BEV_OPT_CLOSE_ON_FREE))
 			== NULL)
 		oom();
 
-	if (bufferevent_socket_connect(bev, &addr, addrlen) == -1) {
+	if (bufferevent_socket_connect(irc_bev, &addr, addrlen) == -1) {
 		close(sfd);
-		bufferevent_free(bev);
+		bufferevent_free(irc_bev);
 		log_fatal(SS_INT, "unable to connect: %s",
 				evutil_socket_error_to_string(
 					EVUTIL_SOCKET_ERROR()));
 	}
 
-	bufferevent_setcb(bev, conn_read_cb, NULL, conn_event_cb, NULL);
-	bufferevent_enable(bev, EV_READ | EV_WRITE);
+	bufferevent_setcb(irc_bev, conn_read_cb, NULL, conn_event_cb, NULL);
+	bufferevent_enable(irc_bev, EV_READ | EV_WRITE);
 }
 
 static void
@@ -603,7 +608,7 @@ daemonize(void)
 		break;
 	case -1:
 		log_fatal(SS_INT, "unable to fork: %s", strerror(errno));
-		break;
+		return;
 	default:
 		exit(0);
 		break;
@@ -613,6 +618,125 @@ daemonize(void)
 		log_fatal(SS_INT, "unable to setsid: %s", strerror(errno));
 
 	util_rebind_stdfd();
+}
+
+void
+lm_send_hasher_request(const char *password, const uint8_t *salt)
+{
+	uint8_t buf[PASSWORD_LEN + SALT_LEN + sizeof(uint8_t)];
+
+	memset(buf, 0, sizeof(buf));
+
+	memcpy(buf, password, strlen(password));
+	memcpy(buf + PASSWORD_LEN, salt, SALT_LEN);
+	buf[PASSWORD_LEN + SALT_LEN] = (uint8_t)strlen(password);
+
+	/* caller wipes password and salt */
+
+	evbuffer_expand(bufferevent_get_output(hasher_bev), sizeof(buf));
+	evbuffer_add(bufferevent_get_output(hasher_bev), buf, sizeof(buf));
+
+	crypto_wipe(buf, sizeof(buf));
+}
+
+static void
+hasher(int fd)
+{
+	void *work_area = smalloc(102400000LU);
+	uint8_t hash[HASH_LEN];
+	uint8_t buf[PASSWORD_LEN + SALT_LEN + sizeof(uint8_t)];
+	uint8_t *password = buf;
+	uint8_t *salt = buf + PASSWORD_LEN;
+	uint8_t *pwlen = buf + PASSWORD_LEN + SALT_LEN;
+
+	/* The hasher is in the position of only having to read and write from
+	 * the one fd -- synchronous handling is good enough.
+	 */
+
+	/* read password and salt */
+	errno = 0;
+	while (read(fd, buf, sizeof(buf)) == (ssize_t)sizeof(buf)) {
+		/* hash */
+		crypto_argon2i(hash, HASH_LEN,
+				work_area, 100000,
+				3,
+				password, *pwlen,
+				salt, SALT_LEN);
+		crypto_wipe(buf, sizeof(buf));
+		/* write hash */
+		if (write(fd, hash, HASH_LEN) != HASH_LEN) {
+			log_error(SS_INT, "unable to write hash: %s",
+					strerror(errno));
+			crypto_wipe(hash, sizeof(hash));
+			exit(1);
+		}
+		crypto_wipe(hash, sizeof(hash));
+		log_debug(SS_INT, "sent hash");
+	}
+	free(work_area);
+	if (errno != 0)
+		log_error(SS_INT, "unable to read hasher fd: %s",
+				strerror(errno));
+	exit(errno == 0);
+}
+
+static void
+hasher_read_cb(struct bufferevent *b, void *arg)
+{
+	int nr;
+	uint8_t buf[HASH_LEN];
+
+	while ((nr = evbuffer_remove(bufferevent_get_input(b), buf,
+				sizeof(buf))) == (int)sizeof(buf)) {
+		log_debug(SS_INT, "got hash (len %d)", nr);
+		/* This assumes response order matching outgoing order. */
+		db_hash_response(buf);
+	}
+}
+
+static void
+hasher_event_cb(struct bufferevent *b, short revents, void *arg)
+{
+	if (revents & BEV_EVENT_ERROR) {
+		log_fatal(SS_INT, "socket error from hasher: %s",
+				evutil_socket_error_to_string(
+					EVUTIL_SOCKET_ERROR()));
+	} else if (revents & BEV_EVENT_EOF) {
+		log_fatal(SS_INT, "EOF received from hasher");
+	}
+}
+
+static int
+lm_fork_hasher(void)
+{
+	int fdv[2];
+	pid_t pid;
+
+	if (socketpair(AF_UNIX, SOCK_STREAM, 0, fdv) != 0)
+		log_fatal(SS_INT, "unable to get socketpair: %s",
+				strerror(errno));
+
+	switch ((pid = fork())) {
+	case 0:
+		hasher(fdv[0]);
+		break;
+	case -1:
+		log_fatal(SS_INT, "unable to fork: %s", strerror(errno));
+		return -1;
+	default:
+		if ((hasher_bev = bufferevent_socket_new(ev_base, fdv[1],
+						BEV_OPT_CLOSE_ON_FREE))
+				== NULL)
+			oom();
+
+		bufferevent_setcb(hasher_bev, hasher_read_cb, NULL,
+				hasher_event_cb, NULL);
+		bufferevent_enable(hasher_bev, EV_READ | EV_WRITE);
+		hasher_pid = pid;
+		break;
+	}
+
+	return 0;
 }
 
 int
@@ -649,14 +773,6 @@ main(int argc, char *argv[])
 	if ((ev_base = event_base_new()) == NULL)
 		oom();
 
-	event_assign(&sigev_int, ev_base, SIGINT, EV_SIGNAL | EV_PERSIST,
-			signal_cb, &sigev_int);
-	event_assign(&sigev_term, ev_base, SIGTERM, EV_SIGNAL | EV_PERSIST,
-			signal_cb, &sigev_term);
-	event_assign(&ev_heartbeat, ev_base, -1, EV_PERSIST, heartbeat_cb, NULL);
-	event_add(&sigev_int, NULL);
-	event_add(&sigev_term, NULL);
-	event_add(&ev_heartbeat, &heartbeat_freq);
 	connect_remote();
 
 	if (dofork) {
@@ -665,10 +781,25 @@ main(int argc, char *argv[])
 	}
 
 	log_switchover();
+	if (lm_fork_hasher() != 0)
+		return 1;
+	event_assign(&sigev_int, ev_base, SIGINT, EV_SIGNAL | EV_PERSIST,
+			signal_cb, &sigev_int);
+	event_assign(&sigev_term, ev_base, SIGTERM, EV_SIGNAL | EV_PERSIST,
+			signal_cb, &sigev_term);
+	event_assign(&ev_heartbeat, ev_base, -1, EV_PERSIST, heartbeat_cb, NULL);
+	event_add(&sigev_int, NULL);
+	event_add(&sigev_term, NULL);
+	event_add(&ev_heartbeat, &heartbeat_freq);
 	event_loop_running = true;
 	event_base_dispatch(ev_base);
 
 	disconnect();
+	if (hasher_pid != 0) {
+		bufferevent_free(hasher_bev);
+		(void)kill(hasher_pid, SIGTERM);
+		(void)wait(NULL);
+	}
 	event_base_free(ev_base);
 	db_fini();
 	log_fini();

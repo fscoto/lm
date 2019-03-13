@@ -61,7 +61,7 @@ usage(const struct User *u, const struct Command *cmd)
 static bool
 is_valid_password(const char *password)
 {
-	return (strlen(password) < 128 && *password != ':');
+	return (strlen(password) < PASSWORD_LEN && *password != ':');
 }
 
 /* https://www.owasp.org/index.php/Input_Validation_Cheat_Sheet#Email_Address_Validation */
@@ -86,14 +86,45 @@ is_valid_email(const char *email)
 	return true;
 }
 
+static void
+cmd_auth_cb(enum DBError dbe, const char *account, time_t ts, void *arg)
+{
+	struct User *source = arg;
+	char numnick[6];
+
+	switch (dbe) {
+	case DBE_OK:
+		strcpy(source->account, account);
+		s2s_line("AC %s %s %llu",
+				user_numnick(numnick, source), source->account,
+				(unsigned long long)ts);
+		reply(source, "Password accepted; you are now authenticated "
+				"as %s.", source->account);
+		break;
+	case DBE_PW_MISMATCH:
+	case DBE_NO_SUCH_ACCOUNT:
+		reply(source, "Invalid credentials.");
+		log_audit("%s%s!%s@%s(%s)=%s/%s failed auth for "
+				"%saccount %s",
+			source->is_oper ? "*" : "", source->nick, source->ident,
+			source->host, source->sockip, source->account,
+			source->gecos,
+			(dbe == DBE_NO_SUCH_ACCOUNT) ? "non-existent " : "",
+			account);
+		break;
+	default:
+		reply(source, "An error was encountered when fetching "
+				"the account.");
+		reply(source, "Please contact an IRC operator with this "
+				"error code: %d.", dbe);
+		break;
+	}
+}
+
 static enum CommandStatus
 cmd_auth(const struct Command *cmd, struct User *source,
 		size_t argc, char *argv[])
 {
-	time_t ts;
-	enum DBError dbe;
-	char numnick[6];
-
 	/* ircu actually enforces this */
 	if (user_authed(source)) {
 		reply(source, "You cannot reauthenticate.");
@@ -107,26 +138,8 @@ cmd_auth(const struct Command *cmd, struct User *source,
 		return CS_SYNTAX;
 	}
 
-	switch (dbe = db_check_auth(argv[0], argv[1], &ts)) {
-	case DBE_OK:
-		strcpy(source->account, argv[0]);
-		s2s_line("AC %s %s %llu",
-				user_numnick(numnick, source), source->account,
-				(unsigned long long)ts);
-		reply(source, "Password accepted; you are now authenticated "
-				"as %s.", source->account);
-		return CS_OK;
-	case DBE_PW_MISMATCH:
-	case DBE_NO_SUCH_ACCOUNT:
-		reply(source, "Invalid credentials.");
-		return CS_FAILURE;
-	default:
-		reply(source, "An error was encountered when fetching "
-				"the account.");
-		reply(source, "Please contact an IRC operator with this "
-				"error code: %d.", dbe);
-		return CS_INTERNAL;
-	}
+	db_check_auth(argv[0], argv[1], cmd_auth_cb, source);
+	return CS_OK;
 }
 
 static enum CommandStatus
@@ -302,11 +315,34 @@ cmd_hello(const struct Command *cmd, struct User *source,
 	return CS_OK;
 }
 
+static void
+cmd_confirm_cb(enum DBError dbe, const char *account, time_t ts,
+		void *arg)
+{
+	const struct User *source = arg;
+
+	(void)ts;
+
+	if (dbe != DBE_OK) {
+		reply(source, "An error was encountered when setting "
+				"your password.");
+		reply(source, "Please contact an IRC operator with this "
+				"error code: %d.", dbe);
+	}
+
+	log_audit("%s%s!%s@%s(%s)=%s/%s changed password for account %s "
+			"(registered)",
+		source->is_oper ? "*" : "", source->nick, source->ident,
+		source->host, source->sockip, source->account,
+		source->gecos,
+		account);
+	reply(source, "Registration confirmed successfully.");
+}
+
 static enum CommandStatus
 cmd_confirm(const struct Command *cmd, struct User *source,
 		size_t argc, char *argv[])
 {
-	enum DBError dbe;
 	char account[ACCOUNT_LEN + 1];
 
 	if (user_authed(source)) {
@@ -334,8 +370,8 @@ cmd_confirm(const struct Command *cmd, struct User *source,
 
 	if (!is_valid_password(argv[1])) {
 		reply(source, "Invalid password.");
-		reply(source, "A password must not exceed 128 bytes in "
-				"length or start with ':'.");
+		reply(source, "A password must not exceed %d bytes in "
+				"length or start with ':'.", PASSWORD_LEN);
 		return CS_FAILURE;
 	}
 
@@ -351,23 +387,81 @@ cmd_confirm(const struct Command *cmd, struct User *source,
 		return CS_FAILURE;
 	}
 
-	if ((dbe = db_change_password(account, argv[1])) != DBE_OK) {
-		reply(source, "An error was encountered when setting "
+	db_change_password(account, argv[1],
+		cmd_confirm_cb, source);
+	return CS_OK;
+}
+
+struct NewPassInfo {
+	struct User *source;
+	char newpass[PASSWORD_LEN];
+};
+
+static void
+password_change_cb(enum DBError dbe, const char *account, time_t ts,
+		void *arg)
+{
+	const struct User *source = arg;
+
+	(void)ts;
+
+	if (dbe != DBE_OK) {
+		reply(source, "An error was encountered when changing "
 				"your password.");
 		reply(source, "Please contact an IRC operator with this "
 				"error code: %d.", dbe);
-		return CS_FAILURE;
 	}
 
-	reply(source, "Registration confirmed successfully.");
-	return CS_OK;
+	log_audit("%s%s!%s@%s(%s)=%s/%s changed password for account %s",
+		source->is_oper ? "*" : "", source->nick, source->ident,
+		source->host, source->sockip, source->account,
+		source->gecos,
+		account);
+	reply(source, "Password for account %s changed succesfully.", account);
+}
+
+static void
+cmd_newpass_auth_cb(enum DBError dbe, const char *account, time_t ts, void *arg)
+{
+	struct NewPassInfo *npi = arg;
+
+	(void)ts;
+
+	switch (dbe) {
+	case DBE_OK:
+		break;
+	case DBE_PW_MISMATCH:
+		log_audit("%s%s!%s@%s(%s)=%s/%s failed NEWPASS auth for "
+				"account %s",
+			npi->source->is_oper ? "*" : "", npi->source->nick,
+			npi->source->ident,
+			npi->source->host, npi->source->sockip,
+			npi->source->account,
+			npi->source->gecos,
+			account);
+		reply(npi->source, "Old password incorrect.");
+		goto clean;
+	default:
+		reply(npi->source, "An error was encountered when fetching "
+				"your account.");
+		reply(npi->source, "Please contact an IRC operator with this "
+				"error code: %d.", dbe);
+		goto clean;
+	}
+
+	db_change_password(npi->source->account, npi->newpass,
+		password_change_cb, npi->source);
+
+clean:
+	crypto_wipe(npi, sizeof(*npi));
+	free(npi);
 }
 
 static enum CommandStatus
 cmd_newpass(const struct Command *cmd, struct User *source,
 		size_t argc, char *argv[])
 {
-	enum DBError dbe;
+	struct NewPassInfo *npi = smalloc(sizeof(*npi));
 
 	if (!user_authed(source)) {
 		reply(source, "You must be authenticated to use this command.");
@@ -381,39 +475,26 @@ cmd_newpass(const struct Command *cmd, struct User *source,
 
 	if (!is_valid_password(argv[1])) {
 		reply(source, "Invalid password.");
-		reply(source, "A password must not exceed 128 bytes in "
-				"length or start with ':'.");
+		reply(source, "A password must not exceed %d bytes in "
+				"length or start with ':'.", PASSWORD_LEN);
 		return CS_FAILURE;
 	}
 
-	switch (dbe = db_check_auth(source->account, argv[0], NULL)) {
-	case DBE_OK:
-		break;
-	case DBE_PW_MISMATCH:
-		reply(source, "Old password invalid.");
-		return CS_FAILURE;
-	default:
-		reply(source, "An error was encountered when fetching "
-				"your account.");
-		reply(source, "Please contact an IRC operator with this "
-				"error code: %d.", dbe);
-		return CS_INTERNAL;
-	}
-
-	if (strcmp(argv[1], argv[2])) {
+	if (strcmp(argv[1], argv[2]) != 0) {
 		reply(source, "The new passwords do not match.");
 		return CS_FAILURE;
 	}
 
-	if ((dbe = db_change_password(source->account, argv[1])) != DBE_OK) {
-		reply(source, "An error was encountered when changing "
-				"your password.");
-		reply(source, "Please contact an IRC operator with this "
-				"error code: %d.", dbe);
-		return CS_INTERNAL;
-	}
+	npi->source = source;
+	/* is_valid_password() does a length check already */
+	strcpy(npi->newpass, argv[1]);
 
-	reply(source, "Password changed succesfully.");
+	db_check_auth(source->account, argv[0], cmd_newpass_auth_cb,
+			npi);
+
+	crypto_wipe(argv[0], strlen(argv[0]));
+	crypto_wipe(argv[1], strlen(argv[1]));
+	crypto_wipe(argv[2], strlen(argv[2]));
 	return CS_OK;
 }
 
@@ -524,7 +605,6 @@ static enum CommandStatus
 cmd_resetpass(const struct Command *cmd, struct User *source,
 		size_t argc, char *argv[])
 {
-	enum DBError dbe;
 	char account[ACCOUNT_LEN + 1];
 
 	if (argc < 3) {
@@ -554,8 +634,8 @@ cmd_resetpass(const struct Command *cmd, struct User *source,
 
 	if (!is_valid_password(argv[1])) {
 		reply(source, "Invalid password.");
-		reply(source, "A password must not exceed 128 bytes in "
-				"length or start with ':'.");
+		reply(source, "A password must not exceed %d bytes in "
+				"length or start with ':'.", PASSWORD_LEN);
 		return CS_FAILURE;
 	}
 
@@ -571,15 +651,11 @@ cmd_resetpass(const struct Command *cmd, struct User *source,
 		return CS_FAILURE;
 	}
 
-	if ((dbe = db_change_password(account, argv[1])) != DBE_OK) {
-		reply(source, "An error was encountered when changing "
-				"your password.");
-		reply(source, "Please contact an IRC operator with this "
-				"error code: %d.", dbe);
-		return CS_INTERNAL;
-	}
+	db_change_password(source->account, argv[1],
+		password_change_cb, source);
+	crypto_wipe(argv[1], strlen(argv[1]));
+	crypto_wipe(argv[2], strlen(argv[2]));
 
-	reply(source, "Password changed succesfully.");
 	return CS_OK;
 }
 
@@ -615,23 +691,6 @@ cmd_registerchan(const struct Command *cmd, struct User *source,
 			config.server.numeric, config.uplink.l_numeric,
 			argv[0], source->account, source->account);
 	return CS_OK;
-}
-
-/*
- * We should strip ANSI escape sequences from user-controlled fields for
- * security reasons, but to prevent general terminal weirdness, we'll strip
- * everything below ' '.
- * cf. https://security.stackexchange.com/a/56391
- */
-static char *
-stripesc(char *s)
-{
-	for (char *p = s; *p != '\0'; ++p) {
-		if (*p < ' ')
-			*p = '_';
-	}
-
-	return s;
 }
 
 static const char *
@@ -716,6 +775,7 @@ C_AR "token" C_AR " " C_AR "new password" C_AR " " C_AR "new password",
 "Confirms your e-mail address.\n"
 C_AR "token" C_AR " will have been sent to you in an e-mail through the\n"
 C_NM "HELLO" C_NM " command.\n"
+/* PASSWORD_LEN */
 "A password must not exceed 128 bytes in length, start with ':' or\n"
 "contain ' '.\n"
 "If you are sure your client will always send text in the same encoding,\n"
@@ -729,6 +789,7 @@ cmd_confirm,
 "Changes your password.",
 C_AR "old password" C_AR " " C_AR "new password" C_AR " " C_AR "new password",
 "Changes your account password.\n"
+/* PASSWORD_LEN */
 "A password must not exceed 128 bytes in length, start with ':' or\n"
 "contain ' '.\n"
 "If you are sure your client will always send text in the same encoding,\n"
@@ -753,6 +814,7 @@ cmd_lostpass,
 C_AR "token" C_AR " " C_AR "new password" C_AR " " C_AR "new password",
 "Resets your password after LOSTPASS.\n"
 C_AR "token" C_AR "will have been sent to you in an e-mail.\n"
+/* PASSWORD_LEN */
 "A password must not exceed 128 bytes in length, start with ':' or\n"
 "contain ' '.\n"
 "If you are sure your client will always send text in the same encoding,\n"

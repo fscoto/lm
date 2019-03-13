@@ -132,3 +132,20 @@ util_rebind_stdfd(void)
 	return 0;
 }
 
+/*
+ * We should strip ANSI escape sequences from user-controlled fields for
+ * security reasons, but to prevent general terminal weirdness, we'll strip
+ * everything below ' '.
+ * cf. https://security.stackexchange.com/a/56391
+ */
+char *
+stripesc(char *s)
+{
+	for (char *p = s; *p != '\0'; ++p) {
+		if (*p < ' ')
+			*p = '_';
+	}
+
+	return s;
+}
+

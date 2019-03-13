@@ -28,6 +28,7 @@
 #include <time.h>
 
 #include "token.h"
+#include "logging.h"
 #include "monocypher.h"
 #include "entities.h"
 #include "util.h"
@@ -129,8 +130,11 @@ token_create(char buf[static TOKEN_LEN + 1], const char *account)
 	char encoded_sig[17];
 
 	if (!has_token_key) {
-		if (randombytes(token_key, sizeof(token_key)) == NULL)
+		if (randombytes(token_key, sizeof(token_key)) == NULL) {
+			log_fatal(SS_INT, "randombytes() for %zu bytes failed",
+					sizeof(token_key));
 			return NULL;
+		}
 	}
 
 	now = time(NULL);

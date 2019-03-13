@@ -293,6 +293,12 @@ numnick_register_user(const char *numnick, const char *nick, const char *ident,
 	FILLFIELD(host);
 	FILLFIELD(gecos);
 #undef FILLFIELD
+	/* gecos is untrusted user input and may have escape sequences that may
+	 * become a security vulnerability later in the code.
+	 * I'd rather discard part of the gecos here than have to carry the risk
+	 * of a log entry becoming an issue later on.
+	 */
+	(void)stripesc(gecos);
 	decode_ip_numeric_into_user(u, ip_numeric);
 	u->is_oper = is_oper;
 

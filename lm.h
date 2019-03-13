@@ -1,6 +1,8 @@
 #ifndef LM_LM_H
 #define LM_LM_H
 
+#include <stdint.h>
+
 #include "entities.h"
 
 struct Config {
@@ -35,6 +37,7 @@ void send_line(const char *fmt, ...);
 void reply(const struct User *u, const char *fmt, ...);
 void s2s_line(const char *fmt, ...);
 void lm_exit(void);
+void lm_send_hasher_request(const char *password, const uint8_t *salt);
 
 #endif
 

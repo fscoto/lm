@@ -13,8 +13,25 @@
 #include "token.h"
 #include "util.h"
 
-#define HASH_LEN	(32)
-#define SALT_LEN	(16)
+struct HashRequest {
+	struct HashRequest *next;
+	void *theirarg;
+	void (*theircallback)(enum DBError dbe,
+			const char *account,
+			time_t ts,
+			void *arg);
+	enum DBError (*mycallback)(uint8_t *salt,
+			uint8_t *myhash,
+			uint8_t *theirhash,
+			const char *account,
+			time_t ts);
+	time_t ts;
+	char account[ACCOUNT_LEN];
+	uint8_t myhash[HASH_LEN];
+	uint8_t salt[SALT_LEN];
+};
+
+static struct HashRequest *hash_requests_head;
 
 /* In case argon2i ever gets broken or we need to change the default parameters
  * for argon2i, it's best we encode this information already.
@@ -29,20 +46,6 @@ static inline int
 prepare(const char *query, sqlite3_stmt **s)
 {
 	return sqlite3_prepare_v2(db, query, strlen(query), s, NULL);
-}
-
-static void
-hash_password(unsigned char hash[static HASH_LEN], const char *password,
-		const unsigned char salt[static SALT_LEN])
-{
-	/* 100 megabytes; 100000 blocks @ 1024 bytes each */
-	void *work_area = smalloc(102400000LU);
-	crypto_argon2i(hash, HASH_LEN,
-			work_area, 100000,
-			3,
-			(const unsigned char *)password, strlen(password),
-			(const unsigned char *)salt, SALT_LEN);
-	free(work_area);
 }
 
 int
@@ -82,51 +85,15 @@ db_init(void)
 	return 0;
 }
 
-enum DBError
-db_check_auth(const char *account, const char *password, time_t *ts)
+static enum DBError
+db_check_auth_cb(uint8_t *salt,
+		uint8_t *myhash,
+		uint8_t *theirhash,
+		const char *account,
+		time_t ts)
 {
-	sqlite3_stmt *s;
-	const unsigned char *salt;
-	const unsigned char *myhash;
-	int sqlite_ret;
 	enum DBError ret;
-	unsigned char theirhash[HASH_LEN];
 
-	log_debug(SS_SQL, "auth check for %s with %s (TS: %llu)...");
-
-	prepare("SELECT pwsalt, pwhash, created FROM accounts WHERE "
-			"LOWER(name) = LOWER(?) AND expires = 0 LIMIT 1", &s);
-	sqlite3_bind_text(s, 1, account, strlen(account), SQLITE_STATIC);
-
-	sqlite_ret = sqlite3_step(s);
-	if (sqlite_ret == SQLITE_DONE) {
-		crypto_wipe((unsigned char *)password, strlen(password));
-		sqlite3_finalize(s);
-		return DBE_NO_SUCH_ACCOUNT;
-	} else if (sqlite_ret != SQLITE_ROW) {
-		log_error(SS_SQL, "unable to SELECT: %s",
-				sqlite3_errstr(sqlite_ret));
-		crypto_wipe((unsigned char *)password, strlen(password));
-		sqlite3_finalize(s);
-		return DBE_SQLITE;
-	}
-
-	salt = sqlite3_column_blob(s, 0);
-	myhash = sqlite3_column_blob(s, 1);
-	if (sqlite3_column_bytes(s, 0) != SALT_LEN) {
-		log_error(SS_SQL, "SALT_LEN desync");
-		sqlite3_finalize(s);
-		crypto_wipe((unsigned char *)password, strlen(password));
-		return DBE_DESYNC;
-	}
-	if (sqlite3_column_bytes(s, 1) != HASH_LEN) {
-		log_error(SS_SQL, "HASH_LEN desync");
-		sqlite3_finalize(s);
-		crypto_wipe((unsigned char *)password, strlen(password));
-		return DBE_DESYNC;
-	}
-	hash_password(theirhash, password, salt);
-	crypto_wipe((unsigned char *)password, strlen(password));
 	if (crypto_verify32(theirhash, myhash) != 0) {
 		ret = DBE_PW_MISMATCH;
 		log_debug(SS_SQL, "auth check for %s failed", account);
@@ -134,14 +101,137 @@ db_check_auth(const char *account, const char *password, time_t *ts)
 		ret = DBE_OK;
 		log_debug(SS_SQL, "auth check for %s succeeded (TS: %llu)",
 				account,
-				(unsigned long long)sqlite3_column_int64(s, 2));
+				(unsigned long long)ts);
 	}
 	crypto_wipe(theirhash, HASH_LEN);
-	if (ts != NULL)
-		*ts = (time_t)sqlite3_column_int64(s, 2);
-	sqlite3_finalize(s);
-
+	crypto_wipe(myhash, HASH_LEN);
+	crypto_wipe(salt, SALT_LEN);
 	return ret;
+}
+
+void
+db_hash_response(uint8_t *theirhash)
+{
+	struct HashRequest *hr = hash_requests_head;
+
+	if (hr == NULL) {
+		log_fatal(SS_INT, "got hasher response but no requests");
+		return;
+	}
+	hash_requests_head = hr->next;
+	hr->theircallback(hr->mycallback(hr->salt, hr->myhash, theirhash,
+				hr->account, hr->ts),
+			hr->account, hr->ts, hr->theirarg);
+	free(hr);
+}
+
+static void
+hash_request(const char *account,
+		const uint8_t *myhash,
+		const char *password,
+		const uint8_t *salt,
+		time_t ts,
+		void *theirarg,
+		void (*theircallback)(enum DBError dbe,
+			const char *account,
+			time_t ts,
+			void *arg),
+		enum DBError (*mycallback)(uint8_t *salt,
+			uint8_t *myhash,
+			uint8_t *theirhash,
+			const char *account,
+			time_t ts))
+{
+	struct HashRequest *hr = smalloc(sizeof(*hr));
+	struct HashRequest *tail;
+
+	hr->theirarg = theirarg;
+	hr->theircallback = theircallback;
+	hr->mycallback = mycallback;
+	hr->ts = ts;
+	if (strlen(account) >= sizeof(hr->account))
+		log_fatal(SS_SQL, "oversized account name passed");
+	strcpy(hr->account, account);
+	memcpy(hr->salt, salt, SALT_LEN);
+	if (myhash != NULL)
+		memcpy(hr->myhash, myhash, HASH_LEN);
+	else
+		memset(hr->myhash, 0, HASH_LEN);
+
+	/* insert at tail to keep order, which lm.c:hasher_read_cb()
+	 * and db_hash_response() rely on. */
+	hr->next = NULL;
+	if (hash_requests_head == NULL) {
+		hash_requests_head = hr;
+	} else {
+		for (tail = hash_requests_head;
+				tail->next != NULL;
+				tail = tail->next)
+			;
+		tail->next = hr;
+	}
+
+	lm_send_hasher_request(password, salt);
+}
+
+void
+db_check_auth(const char *account, char *password,
+		void (*theircallback)(enum DBError dbe,
+			const char *account,
+			time_t ts,
+			void *arg),
+		void *theirarg)
+{
+	sqlite3_stmt *s;
+	const uint8_t *salt;
+	const uint8_t *myhash;
+	int sqlite_ret;
+
+	log_debug(SS_SQL, "auth check for %s...", account);
+
+	prepare("SELECT pwsalt, pwhash, created FROM accounts WHERE "
+			"LOWER(name) = LOWER(?) AND expires = 0 LIMIT 1", &s);
+	sqlite3_bind_text(s, 1, account, strlen(account), SQLITE_STATIC);
+
+	sqlite_ret = sqlite3_step(s);
+	if (sqlite_ret == SQLITE_DONE) {
+		crypto_wipe(password, strlen(password));
+		sqlite3_finalize(s);
+		theircallback(DBE_NO_SUCH_ACCOUNT, account, 0, theirarg);
+		return;
+	} else if (sqlite_ret != SQLITE_ROW) {
+		log_error(SS_SQL, "unable to SELECT: %s",
+				sqlite3_errstr(sqlite_ret));
+		crypto_wipe(password, strlen(password));
+		sqlite3_finalize(s);
+		theircallback(DBE_SQLITE, account, 0, theirarg);
+		return;
+	}
+
+	salt = sqlite3_column_blob(s, 0);
+	myhash = sqlite3_column_blob(s, 1);
+	if (sqlite3_column_bytes(s, 0) != SALT_LEN) {
+		log_error(SS_SQL, "SALT_LEN desync");
+		sqlite3_finalize(s);
+		crypto_wipe(password, strlen(password));
+		theircallback(DBE_DESYNC, account, 0, theirarg);
+		return;
+	}
+	if (sqlite3_column_bytes(s, 1) != HASH_LEN) {
+		log_error(SS_SQL, "HASH_LEN desync");
+		sqlite3_finalize(s);
+		crypto_wipe(password, strlen(password));
+		theircallback(DBE_DESYNC, account, 0, theirarg);
+		return;
+	}
+	hash_request(account, myhash, password, salt,
+			(time_t)sqlite3_column_int64(s, 2),
+			theirarg, theircallback, db_check_auth_cb);
+	sqlite3_finalize(s);
+	crypto_wipe(password, strlen(password));
+	/* sqlite3_column_blob() returns const void *,
+	 * so we cannot wipe myhash and salt.
+	 */
 }
 
 enum DBError
@@ -182,38 +272,64 @@ db_create_account(const struct User *u, const char *name, const char *email)
 	return DBE_OK;
 }
 
-enum DBError
-db_change_password(const char *account, const char *password)
+static enum DBError
+db_change_password_cb(uint8_t *salt,
+		uint8_t *myhash,
+		uint8_t *theirhash,
+		const char *account,
+		time_t ts)
 {
 	sqlite3_stmt *s;
 	int sqlite_ret;
-	unsigned char hash[HASH_LEN];
-	unsigned char salt[SALT_LEN];
+	enum DBError ret;
 
-	log_debug(SS_SQL, "updating password for %s to be %s",
-			account, password);
-
-	if (randombytes(salt, sizeof(salt)) == NULL)
-		return DBE_CRYPTO;
-	hash_password(hash, password, salt);
-	crypto_wipe((unsigned char *)password, strlen(password));
+	(void)myhash;
+	(void)ts;
 
 	prepare("UPDATE accounts SET pwalgo = ?, pwsalt = ?, pwhash = ?, "
 			"expires = 0 WHERE LOWER(name) = LOWER(?)", &s);
 	sqlite3_bind_int(s, 1, PA_ARGON2I);
 	sqlite3_bind_blob(s, 2, salt, SALT_LEN, SQLITE_STATIC);
-	sqlite3_bind_blob(s, 3, hash, HASH_LEN, SQLITE_STATIC);
+	sqlite3_bind_blob(s, 3, theirhash, HASH_LEN, SQLITE_STATIC);
 	sqlite3_bind_text(s, 4, account, strlen(account), SQLITE_STATIC);
 
 	if ((sqlite_ret = sqlite3_step(s)) != SQLITE_DONE) {
 		log_error(SS_SQL, "unable to UPDATE: %s",
 				sqlite3_errstr(sqlite_ret));
 		sqlite3_finalize(s);
-		return DBE_SQLITE;
+		ret = DBE_SQLITE;
+		goto clean;
 	}
 
+	ret = DBE_OK;
+
+clean:
+	crypto_wipe(salt, SALT_LEN);
+	crypto_wipe(theirhash, HASH_LEN);
 	sqlite3_finalize(s);
-	return DBE_OK;
+	return ret;
+}
+
+void
+db_change_password(const char *account, const char *password,
+		void (*theircallback)(enum DBError dbe,
+			const char *account,
+			time_t ts,
+			void *arg),
+		void *theirarg)
+{
+	unsigned char salt[SALT_LEN];
+
+	log_debug(SS_SQL, "updating password for %s", account);
+
+	if (randombytes(salt, sizeof(salt)) == NULL) {
+		log_fatal(SS_INT, "randombytes() for %zu bytes failed",
+				sizeof(salt));
+		return;
+	}
+	hash_request(account, NULL, password, salt, 0,
+			theirarg, theircallback, db_change_password_cb);
+	crypto_wipe(salt, sizeof(salt));
 }
 
 enum DBError db_get_account_by_email(const char *email,

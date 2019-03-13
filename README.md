@@ -87,12 +87,7 @@ ISC, see LICENSE
 
 # Bugs and Security Issues
 
-- It is conceivable that a dedicated attacker manages to place many clients on
-  the network and have them authenticate at the same time,
-  causing a DoS attack due to network flood and the (intentionally slow) argon2i
-  hashing process.
-
-Loads more, probably.
+Loads, probably.
 
 **This is not production software.
 It has not spent even a single second of its life in a live environment.
