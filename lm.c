@@ -183,10 +183,10 @@ reply(const struct User *u, const char *fmt, ...)
 	 * We don't want to track users' nicks, however.
 	 * NICKLEN is a configurable feature on ircu, so we cannot make an
 	 * educated worst-case guess, either.
-	 * For the sake of simplicity, user messages are just cut off at 100
+	 * For the sake of simplicity, user messages are just cut off at 256
 	 * characters.
 	 */
-	char buf[101];
+	char buf[256];
 	char numnick[6];
 
 	va_start(ap, fmt);

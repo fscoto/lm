@@ -5,12 +5,8 @@
 
 /* 30 minutes */
 #define TOKEN_EXPIRY	(30*60)
-/* 
- * +20 for strlen(2**64), for the timestamp
- * +16 for the encoded signature
- * +2 for 2x ':'
- */
-#define TOKEN_LEN	(ACCOUNT_LEN+20+16+2)
+/* see comment in numnick.c:decode_token() */
+#define TOKEN_LEN	(80)
 
 enum TokenValidationStatus {
 	TVS_OK,

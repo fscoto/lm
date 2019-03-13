@@ -1,6 +1,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -298,7 +299,7 @@ numnick_register_user(const char *numnick, const char *nick, const char *ident,
 	 * I'd rather discard part of the gecos here than have to carry the risk
 	 * of a log entry becoming an issue later on.
 	 */
-	(void)stripesc(gecos);
+	(void)stripesc(u->gecos);
 	decode_ip_numeric_into_user(u, ip_numeric);
 	u->is_oper = is_oper;
 
@@ -378,3 +379,96 @@ user_numnick(char out[static 6], const struct User *u)
 	return out;
 }
 
+static uint32_t
+decode_token_quintuplet(const char t[4])
+{
+	uint32_t a, b, c, d;
+
+	if ((size_t)t[0] > sizeof(table) ||
+			(size_t)t[1] > sizeof(table) ||
+			(size_t)t[2] > sizeof(table) ||
+			(size_t)t[3] > sizeof(table) ||
+
+			(a = table[(size_t)t[3]]) == 255 ||
+			(b = table[(size_t)t[2]]) == 255 ||
+			(c = table[(size_t)t[1]]) == 255 ||
+			(d = table[(size_t)t[0]]) == 255)
+		return 0xffffffffLU;
+
+	return (a * 64UL*64*64) +
+		(b * 64UL*64) +
+		(c * 64UL) +
+		d;
+}
+
+static void
+store24_le(uint8_t out[3], uint32_t n)
+{
+	out[0] =  n        & 0xff;
+	out[1] = (n >>  8) & 0xff;
+	out[2] = (n >> 16) & 0xff;
+}
+
+static uint32_t
+load24_le(const uint8_t in[3])
+{
+	return (uint32_t)in[0] |
+		((uint32_t)in[1] <<  8) |
+		((uint32_t)in[2] << 16);
+}
+
+int
+decode_token(uint8_t bToken[60], const char szToken[81])
+{
+	/*
+	 * Base 64 is aligned with bytes when the length of the message in bits is
+	 * divisible by 6 and 8.
+	 * The smallest such unit is three bytes (24 bits).
+	 * The token is thus divided into units of three bytes and each of those are
+	 * encoded or decoded separately into or from units of four characters.
+	 * Token format:
+	 *   24 bytes nonce ||
+	 *   16 bytes MAC ||
+	 *   8 bytes timestamp ||
+	 *   ACCOUNT_LEN bytes account name
+	 *   total: 60 bytes (480 bits), divisible by 6 and 8,
+	 *   encoded length: 80 bytes (640 bits).
+	 */
+	static uint8_t buf[60];
+	uint32_t n;
+	uint8_t *out = buf;
+
+	memset(bToken, 0, sizeof(buf));
+
+	if (strlen(szToken) != 80)
+		return -1;
+
+	while (*szToken) {
+		if ((n = decode_token_quintuplet(szToken)) == 0xffffffffLU)
+			return -1;
+		szToken += 4;
+		store24_le(out, n);
+		out += 3;
+	}
+
+	/* do not write bToken unless success;
+	 * do not let partial attacker data near the validation
+	 */
+	memcpy(bToken, buf, sizeof(buf));
+	return 0;
+}
+
+void
+encode_token(char szToken[81], const uint8_t bToken[60])
+{
+	uint32_t n;
+
+	for (size_t i = 0; i < 60; i += 3) {
+		n = load24_le(bToken + i);
+		*szToken++ = alphabet[ n        & 63];
+		*szToken++ = alphabet[(n >>  6) & 63];
+		*szToken++ = alphabet[(n >> 12) & 63];
+		*szToken++ = alphabet[(n >> 18) & 63];
+	}
+	*szToken = '\0';
+}

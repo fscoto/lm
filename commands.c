@@ -363,6 +363,12 @@ cmd_confirm(const struct Command *cmd, struct User *source,
 				"copied it correctly.");
 		return CS_FAILURE;
 	case TVS_EXPIRED:
+		/*
+		 * Special case: LM restart, where we literally lost the user
+		 * info.
+		 * The user will have to wait the 30 (plus up to five) minutes
+		 * out until the stale account is purged from the database.
+		 */
 		reply(source, "Your token has expired.");
 		reply(source, "Please use " C_NM "HELLO" C_NM " again.");
 		return CS_FAILURE;
