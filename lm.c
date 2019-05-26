@@ -337,8 +337,8 @@ handle_nick(char *source, size_t argc, char *argv[])
 {
 	/* nick 1 1511454503 ident host +oiwgrx accname(setbyumode+r) B]AAAB ABAAA :gecos
 	 * 0    1 2          3     4    5       ?6                    7      8     9
-	 * nick 1 1511592719 ~nick hydra.invalid B]AAAB ABAAD :nick
-	 * 0    1 2          3     4             5      6     7
+	 * nick 1 1511592719 ~nick host B]AAAB ABAAD :nick
+	 * 0    1 2          3     4    5      6     7
 	 *
 	 * newnick ts
 	 * 0       1
@@ -385,8 +385,8 @@ handle_quit(char *source, size_t argc, char *argv[])
 static void
 handle_server(char *source, size_t argc, char *argv[])
 {
-	/* hydra.invalid 1 1511454497 1511546930 J10 ABA]] +h6 :The Path of a New Beginning
-	 * 0             1 2          3          4   5     6   7
+	/* server.name 1 1511454497 1511546930 J10 ABA]] +h6 :Server description
+	 * 0           1 2          3          4   5     6   7
 	 */
 	numnick_register_server(argv[5], argv[0],
 			initial_link ? me : numnick_server(source));
