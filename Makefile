@@ -1,13 +1,10 @@
 .POSIX:
 .SUFFIXES:
 
-CC      = clang
-CFLAGS  = -std=c11 -D_DEFAULT_SOURCE
-CFLAGS += -g -O0
-CFLAGS += -Wall -Wextra -Wpedantic -Wno-unused-parameter
+include config.mk
+
 EXTERNAL_CFLAGS = -O2 -std=c99
 MONOCYPHER_CFLAGS = -O3 -std=c99
-LDLIBS  = -levent -lpthread -ldl
 
 OBJS = commands.o db.o lm.o logging.o mail.o numnick.o util.o token.o ini.o \
 	   sqlite3.o monocypher.o

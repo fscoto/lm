@@ -3,4 +3,5 @@ lm.db
 lm.log
 *.o
 /lm
+config.mk
 

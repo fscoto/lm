@@ -20,10 +20,16 @@ distributions.
 
     # apt-get install build-essential libevent-dev
 
-Then, get LM and compile it.
+Then, get LM.
 
     $ git clone https://github.com/fscoto/lm.git
     $ cd lm
+
+Next, copy `config.example.mk` to config.mk and edit it as necessary;
+the default `config.example.mk` should work on standard GNU/Linux distributions.
+
+    $ cp config.example.mk config.mk
+    $ $EDITOR config.mk
     $ make
 
 Copy the configuration file and edit it as required.
