@@ -25,6 +25,9 @@
 #include <event2/event_struct.h>
 #include <event2/util.h>
 
+#ifdef HAS_OPENBSD
+#include <err.h>
+#endif
 #include <errno.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -624,7 +627,7 @@ daemonize(void)
 		break;
 	case -1:
 		log_fatal(SS_INT, "unable to fork: %s", strerror(errno));
-		return;
+		exit(1);
 	default:
 		exit(0);
 		break;
@@ -634,6 +637,9 @@ daemonize(void)
 		log_fatal(SS_INT, "unable to setsid: %s", strerror(errno));
 
 	util_rebind_stdfd();
+#ifdef HAS_OPENBSD
+	setproctitle("main");
+#endif
 }
 
 void
@@ -664,6 +670,14 @@ hasher(int fd)
 	uint8_t *password = buf;
 	uint8_t *salt = buf + PASSWORD_LEN;
 	uint8_t *pwlen = buf + PASSWORD_LEN + SALT_LEN;
+
+#ifdef HAS_OPENBSD
+	setproctitle("hasher");
+#endif
+#ifdef HAS_OPENBSD
+	if (pledge("stdio", "") != 0)
+		exit(1);
+#endif
 
 	/* The hasher is in the position of only having to read and write from
 	 * the one fd -- synchronous handling is good enough.
@@ -764,6 +778,30 @@ main(int argc, char *argv[])
 	int c;
 	bool dofork = true, debug = false;
 
+#ifdef HAS_OPENBSD
+	/* unveil(2) the files we need */
+	if (unveil("lm.log", "wc") != 0)
+		err(1, "unveil lm.log");
+	if (unveil("lm.db", "rwc") != 0)
+		err(1, "unveil lm.db");
+	if (unveil("lm.db-journal", "rwc") != 0)
+		err(1, "unveil lm.db-journal");
+	if (unveil("lm.db-shm", "rwc") != 0)
+		err(1, "unveil lm.db-shm");
+	if (unveil("lm.db-wal", "rwc") != 0)
+		err(1, "unveil lm.db-wal");
+	if (unveil("lm.ini", "r") != 0)
+		err(1, "unveil lm.ini");
+	if (unveil("/dev/urandom", "r") != 0)
+		err(1, "unveil /dev/urandom");
+	if (unveil("/dev/null", "rw") != 0)
+		err(1, "unveil /dev/null");
+	if (unveil("/etc/resolv.conf", "r") != 0)
+		err(1, "unveil /etc/resolv.conf");
+	if (pledge("stdio rpath cpath wpath flock fattr proc exec inet unix dns unveil", NULL) != 0)
+		err(1, "pledge 1");
+#endif
+
 	while ((c = getopt(argc, argv, "dhn")) != -1) {
 		switch (c) {
 		case 'd':
@@ -783,22 +821,55 @@ main(int argc, char *argv[])
 		return 1;
 
 	read_config();
+#ifdef HAS_OPENBSD
+	if (*config.mail.sendmailcmd != '\0') {
+		if (unveil(config.mail.sendmailcmd, "x") != 0)
+			err(1, "unveil %s", config.mail.sendmailcmd);
+	}
+	if (pledge("stdio rpath cpath wpath flock fattr proc exec inet unix dns", NULL) != 0)
+		err(1, "pledge 2");
+#endif
 	if (db_init() != 0)
 		return 1;
 
-	if ((ev_base = event_base_new()) == NULL)
-		oom();
-
-	connect_remote();
-
+	/*
+	 * We *must* fork before creating the event base.
+	 * libevent may use kqueue(2) as the backend.
+	 * The kqueue becomes invalid on fork because it cannot be inherited by
+	 * the child process and the parent proceeds to exit on fork,
+	 * and it is created in event_base_new().
+	 * This failure is silent and just makes libevent be confused
+	 * internally;
+	 * it does not bubble up to the application layer.
+	 *
+	 * This has the unfortunate side effect that we also must do the
+	 * log_switchover() after the fork and fd rebind,
+	 * making it appear that lm started successfully when it hasn't,
+	 * but it beats not correctly starting at all.
+	 */
 	if (dofork) {
 		log_info(SS_INT, "forking into the background");
 		daemonize();
 	}
 
 	log_switchover();
+
+	if ((ev_base = event_base_new()) == NULL)
+		oom();
+	connect_remote();
+
 	if (lm_fork_hasher() != 0)
 		return 1;
+#ifdef HAS_OPENBSD
+	if (*config.mail.sendmailcmd != '\0') {
+		if (pledge("stdio rpath cpath wpath flock fattr proc exec inet unix", NULL)
+				!= 0)
+			err(1, "pledge 3");
+	} else {
+		if (pledge("stdio rpath cpath wpath flock fattr inet unix", NULL) != 0)
+			err(1, "pledge 4");
+	}
+#endif
 	event_assign(&sigev_int, ev_base, SIGINT, EV_SIGNAL | EV_PERSIST,
 			signal_cb, &sigev_int);
 	event_assign(&sigev_term, ev_base, SIGTERM, EV_SIGNAL | EV_PERSIST,
@@ -813,7 +884,14 @@ main(int argc, char *argv[])
 	disconnect();
 	if (hasher_pid != 0) {
 		bufferevent_free(hasher_bev);
+		/*
+		 * Cannot kill the hasher after pledge() because missing proc,
+		 * but it should come home anyway because we closed its socket.
+		 */
+#ifndef HAS_OPENBSD
+		/* Just in case it got stuck. */
 		(void)kill(hasher_pid, SIGTERM);
+#endif
 		(void)wait(NULL);
 	}
 	event_base_free(ev_base);
