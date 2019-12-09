@@ -220,14 +220,44 @@ reply(const struct User *u, const char *fmt, ...)
 static void
 disconnect()
 {
+	log_info(SS_NET, "started disconnecting");
 	if (irc_bev != NULL) {
 		bufferevent_free(irc_bev);
 		irc_bev = NULL;
 	}
 
+	log_info(SS_NET, "freed IRC bev");
 	if (event_loop_running) {
 		event_base_loopexit(ev_base, NULL);
 		event_loop_running = false;
+	}
+	log_info(SS_NET, "exited event loop");
+}
+
+static void
+reap_hasher(void)
+{
+	if (hasher_pid != 0) {
+		int fd;
+
+		fd = bufferevent_getfd(hasher_bev);
+		log_info(SS_INT, "shutting down the hasher socket %d", fd);
+		shutdown(fd, SHUT_RDWR);
+		log_info(SS_INT, "freeing the hasher bufferevent");
+		bufferevent_free(hasher_bev);
+		log_info(SS_INT, "freed the hasher bufferevent");
+		/*
+		 * Cannot kill the hasher after pledge() because missing proc,
+		 * but it should come home anyway because we closed its socket.
+		 */
+#ifndef HAS_OPENBSD
+		/* Just in case it got stuck. */
+		(void)kill(hasher_pid, SIGTERM);
+#endif
+		log_info(SS_INT, "waiting on hasher to die...");
+		(void)wait(NULL);
+		log_info(SS_INT, "hasher dead");
+		hasher_pid = 0;
 	}
 }
 
@@ -586,10 +616,10 @@ signal_cb(evutil_socket_t sfd, short revents, void *arg)
 {
 	struct event *self = arg;
 
-	log_info(SS_INT, "Received signal %d!", event_get_signal(self));
+	log_info(SS_INT, "Received signal %d! Disconnecting...",
+			event_get_signal(self));
 	disconnect();
-	/* Avoid double-firing if signals are sent in quick succession. */
-	event_del(self);
+	log_info(SS_INT, "Disconnected");
 }
 
 static void
@@ -614,6 +644,7 @@ lm_exit(void)
 {
 	if (event_loop_running) {
 		disconnect();
+		reap_hasher();
 	} else {
 		exit(1);
 	}
@@ -685,7 +716,8 @@ hasher(int fd)
 
 	/* read password and salt */
 	errno = 0;
-	while (read(fd, buf, sizeof(buf)) == (ssize_t)sizeof(buf)) {
+	while (recv(fd, buf, sizeof(buf), MSG_WAITALL)
+			== (ssize_t)sizeof(buf)) {
 		/* hash */
 		crypto_argon2i(hash, HASH_LEN,
 				work_area, 100000,
@@ -870,9 +902,9 @@ main(int argc, char *argv[])
 			err(1, "pledge 4");
 	}
 #endif
-	event_assign(&sigev_int, ev_base, SIGINT, EV_SIGNAL | EV_PERSIST,
+	event_assign(&sigev_int, ev_base, SIGINT, EV_SIGNAL,
 			signal_cb, &sigev_int);
-	event_assign(&sigev_term, ev_base, SIGTERM, EV_SIGNAL | EV_PERSIST,
+	event_assign(&sigev_term, ev_base, SIGTERM, EV_SIGNAL,
 			signal_cb, &sigev_term);
 	event_assign(&ev_heartbeat, ev_base, -1, EV_PERSIST, heartbeat_cb, NULL);
 	event_add(&sigev_int, NULL);
@@ -882,18 +914,7 @@ main(int argc, char *argv[])
 	event_base_dispatch(ev_base);
 
 	disconnect();
-	if (hasher_pid != 0) {
-		bufferevent_free(hasher_bev);
-		/*
-		 * Cannot kill the hasher after pledge() because missing proc,
-		 * but it should come home anyway because we closed its socket.
-		 */
-#ifndef HAS_OPENBSD
-		/* Just in case it got stuck. */
-		(void)kill(hasher_pid, SIGTERM);
-#endif
-		(void)wait(NULL);
-	}
+	reap_hasher();
 	event_base_free(ev_base);
 	db_fini();
 	log_fini();
