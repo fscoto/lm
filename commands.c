@@ -80,7 +80,7 @@ is_valid_password(const char *password)
 	return (strlen(password) < PASSWORD_LEN && *password != ':');
 }
 
-/* https://www.owasp.org/index.php/Input_Validation_Cheat_Sheet#Email_Address_Validation */
+/* https://cheatsheetseries.owasp.org/cheatsheets/Input_Validation_Cheat_Sheet.html#email-address-validation */
 static bool
 is_valid_email(const char *email)
 {
