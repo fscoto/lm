@@ -301,7 +301,7 @@ handle_ping(char *source, size_t argc, char *argv[])
 	 * 0                  1                2
 	 */
 	char *szSeconds, *szMSeconds;
-	unsigned long long seconds, mseconds, diff;
+	long long seconds, mseconds, diff;
 	struct timeval now;
 
 	if (argc < 3) {
@@ -315,8 +315,8 @@ handle_ping(char *source, size_t argc, char *argv[])
 	if ((szMSeconds = strchr(szSeconds, '.')) == NULL) {
 		diff = 0;
 	} else {
-		seconds = strtoull(szSeconds, NULL, 10);
-		mseconds = strtoull(szMSeconds + 1, NULL, 10);
+		seconds = strtoll(szSeconds, NULL, 10);
+		mseconds = strtoll(szMSeconds + 1, NULL, 10);
 		diff = (now.tv_sec - seconds) * 1000
 			+ (now.tv_usec - mseconds) / 1000;
 	}
@@ -665,7 +665,6 @@ daemonize(void)
 		exit(1);
 	default:
 		exit(0);
-		break;
 	}
 
 	if (setsid() == -1)

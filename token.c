@@ -101,16 +101,16 @@ token_create(char token[static TOKEN_LEN + 1], const char *account)
 		return NULL;
 	}
 
-	now = time(NULL);
+	now = (uint64_t)time(NULL);
 	store64_le(bNow, now);
 	for (size_t i = 0, len = strlen(account); i < len; ++i)
-		bAccount[i] = account[i];
+		bAccount[i] = (uint8_t)account[i];
 
-	crypto_lock(mac, text, token_key, nonce, text, text_end - text);
+	crypto_lock(mac, text, token_key, nonce, text, (size_t)(text_end - text));
 	encode_token(token, buf);
 
 	if (crypto_unlock(text, token_key, nonce, mac, text,
-				text_end - text) != 0) {
+				(size_t)(text_end - text)) != 0) {
 		log_fatal(SS_INT, "unable to verify fresh token");
 		return NULL;
 	}
@@ -138,7 +138,7 @@ token_validate(const char *token, char account_out[static ACCOUNT_LEN + 1])
 		return TVS_BAD;
 
 	if (crypto_unlock(text, token_key, nonce, mac, text,
-				text_end - text) != 0)
+				(size_t)(text_end - text)) != 0)
 		return TVS_BAD;
 
 	then = load64_le(bNow);
@@ -147,7 +147,7 @@ token_validate(const char *token, char account_out[static ACCOUNT_LEN + 1])
 
 	memset(account_out, '\0', ACCOUNT_LEN + 1);
 	for (size_t i = 0; i < ACCOUNT_LEN; ++i)
-		account_out[i] = bAccount[i];
+		account_out[i] = (char)bAccount[i];
 
 	return TVS_OK;
 }

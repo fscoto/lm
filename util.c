@@ -63,7 +63,7 @@ sstrdup(const char *s)
 	return memcpy(smalloc(len), s, len);
 }
 
-int
+static int
 ensure_read(int fd, unsigned char *buf, size_t nbytes)
 {
 	size_t total = 0;

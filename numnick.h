@@ -19,6 +19,7 @@
 
 struct Server *numnick_server(const char *numnick);
 struct User *numnick_user(const char *numnick);
+void decode_ip_numeric_into_user(struct User *u, const char *ip_numeric);
 struct Server *numnick_register_server(const char *numnick, const char *name,
 		struct Server *uplink);
 struct User *numnick_register_user(const char *numnick, const char *nick,

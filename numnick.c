@@ -25,7 +25,7 @@
 #include "entities.h"
 #include "util.h"
 
-struct Server servers[4096];
+static struct Server servers[4096];
 
 static const char *alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 	"abcdefghijklmnopqrstuvwxyz0123456789[]";

@@ -19,6 +19,7 @@
 #include <strings.h>
 #include <time.h>
 
+#include "commands.h"
 #include "db.h"
 #include "lm.h"
 #include "logging.h"
@@ -722,8 +723,6 @@ cstoa(enum CommandStatus cs) {
 		return "SYNTAX";
 	case CS_INTERNAL:
 		return "INTERNAL";
-	default:
-		return "???";
 	}
 }
 
@@ -761,7 +760,7 @@ cmd_auth,
 "will be shown.",
 cmd_help,
 0,
-{-1}
+{(size_t)-1}
 },
 {
 "SHOWCOMMANDS",
@@ -770,7 +769,7 @@ cmd_help,
 "Lists all commands.\n",
 cmd_showcommands,
 0,
-{-1}
+{(size_t)-1}
 },
 {
 "HELLO",
@@ -784,7 +783,7 @@ C_AR "username" C_AR " " C_AR "e-mail address" C_AR " " C_AR "e-mail address",
 "mistakes.\n",
 cmd_hello,
 0,
-{-1}
+{(size_t)-1}
 },
 {
 "CONFIRM",
@@ -824,7 +823,7 @@ C_AR "username" C_AR " " C_AR "e-mail address",
 "if you have forgotten your password.",
 cmd_lostpass,
 0,
-{-1}
+{(size_t)-1}
 },
 {
 "RESETPASS",
@@ -853,7 +852,7 @@ C_AR "#channel",
 	C_AR "#channel" C_AR " exists.\n",
 cmd_registerchan,
 0,
-{-1}
+{(size_t)-1}
 }
 };
 
@@ -891,13 +890,13 @@ handle_privmsg(char *source, size_t argc, char *argv[])
 			cmd = &commands[i];
 			cs = cmd->handler(cmd, u, cmd_argc - 1, cmd_argv + 1);
 
-			logofs += snprintf(logbuf + logofs,
+			logofs += (size_t)snprintf(logbuf + logofs,
 					sizeof(logbuf) - logofs,
 					"%s with %s (", cstoa(cs), cmd->name);
 
 			/* Obscure password fields from the logs. */
 			for (size_t j = 1; j < cmd_argc; ++j) {
-				logofs += snprintf(logbuf + logofs,
+				logofs += (size_t)snprintf(logbuf + logofs,
 						sizeof(logbuf) - logofs,
 						"%s",
 						is_priv_arg(cmd, j - 1) ?

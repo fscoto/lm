@@ -57,7 +57,7 @@ static sqlite3 *db;
 static inline int
 prepare(const char *query, sqlite3_stmt **s)
 {
-	return sqlite3_prepare_v2(db, query, strlen(query), s, NULL);
+	return sqlite3_prepare_v2(db, query, (int)strlen(query), s, NULL);
 }
 
 int
@@ -203,7 +203,7 @@ db_check_auth(const char *account, char *password,
 
 	prepare("SELECT pwsalt, pwhash, created FROM accounts WHERE "
 			"LOWER(name) = LOWER(?) AND expires = 0 LIMIT 1", &s);
-	sqlite3_bind_text(s, 1, account, strlen(account), SQLITE_STATIC);
+	sqlite3_bind_text(s, 1, account, (int)strlen(account), SQLITE_STATIC);
 
 	sqlite_ret = sqlite3_step(s);
 	if (sqlite_ret == SQLITE_DONE) {
@@ -266,8 +266,8 @@ db_create_account(const struct User *u, const char *name, const char *email)
 
 	prepare("INSERT INTO accounts(name, email, pwalgo, pwsalt, pwhash) "
 			"VALUES (?, ?, -1, '', '')", &s);
-	sqlite3_bind_text(s, 1, name, name_len, SQLITE_STATIC);
-	sqlite3_bind_text(s, 2, email, email_len, SQLITE_STATIC);
+	sqlite3_bind_text(s, 1, name, (int)name_len, SQLITE_STATIC);
+	sqlite3_bind_text(s, 2, email, (int)email_len, SQLITE_STATIC);
 
 	if ((sqlite_ret = sqlite3_step(s)) != SQLITE_DONE) {
 		if (sqlite3_extended_errcode(db) == SQLITE_CONSTRAINT_UNIQUE) {
@@ -303,7 +303,7 @@ db_change_password_cb(uint8_t *salt,
 	sqlite3_bind_int(s, 1, PA_ARGON2I);
 	sqlite3_bind_blob(s, 2, salt, SALT_LEN, SQLITE_STATIC);
 	sqlite3_bind_blob(s, 3, theirhash, HASH_LEN, SQLITE_STATIC);
-	sqlite3_bind_text(s, 4, account, strlen(account), SQLITE_STATIC);
+	sqlite3_bind_text(s, 4, account, (int)strlen(account), SQLITE_STATIC);
 
 	if ((sqlite_ret = sqlite3_step(s)) != SQLITE_DONE) {
 		log_error(SS_SQL, "unable to UPDATE: %s",
@@ -353,7 +353,7 @@ enum DBError db_get_account_by_email(const char *email,
 	prepare("SELECT name FROM accounts WHERE "
 			"LOWER(email) = LOWER(?) AND "
 			"expires = 0 LIMIT 1", &s);
-	sqlite3_bind_text(s, 1, email, strlen(email), SQLITE_STATIC);
+	sqlite3_bind_text(s, 1, email, (int)strlen(email), SQLITE_STATIC);
 
 	log_debug(SS_SQL, "selecting account name for e-mail %s", email);
 
@@ -382,7 +382,7 @@ enum DBError db_get_email_by_account(const char *account,
 	prepare("SELECT email FROM accounts WHERE "
 			"LOWER(name) = LOWER(?) "
 			"AND expires = 0 LIMIT 1", &s);
-	sqlite3_bind_text(s, 1, account, strlen(account), SQLITE_STATIC);
+	sqlite3_bind_text(s, 1, account, (int)strlen(account), SQLITE_STATIC);
 
 	log_debug(SS_SQL, "selecting e-mail for account %s", account);
 
@@ -406,11 +406,11 @@ void
 db_purge_expired(void)
 {
 	sqlite3_stmt *s;
-	uint64_t now = time(NULL);
+	int64_t now = time(NULL);
 	int sqlite_ret;
 
 	prepare("DELETE FROM accounts WHERE expires < ? AND expires != 0", &s);
-	sqlite3_bind_int64(s, 1, (uint64_t)now);
+	sqlite3_bind_int64(s, 1, (int64_t)now);
 
 	log_debug(SS_SQL, "purging accounts where expires < %llu "
 			"&& expires != 0", (unsigned long long)now);
