@@ -55,6 +55,14 @@ scalloc(size_t nmemb, size_t size)
 	return ret;
 }
 
+char *
+sstrdup(const char *s)
+{
+	/* Intentionally ignored for being unrealistic: strlen(s) == SIZE_MAX */
+	size_t len = strlen(s) + 1;
+	return memcpy(smalloc(len), s, len);
+}
+
 int
 ensure_read(int fd, unsigned char *buf, size_t nbytes)
 {

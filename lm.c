@@ -61,15 +61,12 @@ static pid_t hasher_pid;
 
 struct Config config;
 
-static int
-read_config_ini_cb(void *arg, const char *section, const char *key,
-		const char *value)
+static void
+handle_config_item(const char *section, const char *key, const char *value)
 {
-	struct Config *c = arg;
-
 #define IS_KEY_AND_COPY(s, k)	if (!strcmp(section, (#s)) \
 		&& !strcmp(key, (#k))) {\
-	snprintf(c->s.k, sizeof(c->s.k), "%s", value);\
+	snprintf(config.s.k, sizeof(config.s.k), "%s", value);\
 } else
 	IS_KEY_AND_COPY(server, name)
 	IS_KEY_AND_COPY(server, desc)
@@ -91,18 +88,29 @@ read_config_ini_cb(void *arg, const char *section, const char *key,
 				section, key);
 	}
 #undef IS_KEY
-	return 1;
 }
 
 static void
 read_config(void)
 {
 	char my_server_numnick_info[6];
+	struct IniContext ctx;
+	const char *section;
+	const char *key;
+	const char *value;
+	int r;
 
 	memset(&config, 0, sizeof(config));
 
-	if (ini_parse("lm.ini", read_config_ini_cb, &config) != 0) {
-		log_fatal(SS_INT, "unable to parse lm.ini");
+	if (ini_open(&ctx, "lm.ini") != 0) {
+		log_fatal(SS_INT, "unable to open lm.ini");
+		return;
+	}
+	while ((r = ini_next(&ctx, &section, &key, &value)) == 0)
+		handle_config_item(section, key, value);
+
+	if (r != 1) {
+		log_fatal(SS_INT, "failed to parse lm.ini: %d", r);
 		return;
 	}
 
